@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -48,6 +49,11 @@ def default_population():
 
 
 def default_stops():
+    """
+    데모용 fallback.
+    실제 공모전 제출에서는 청주시 공식 BIS CSV를
+    '청주시 정류장 CSV' 업로더에 넣어 사용하는 것을 권장합니다.
+    """
     return pd.DataFrame({
         "노선ID": (
             ["P001"] * 6
@@ -59,37 +65,217 @@ def default_stops():
             + list(range(1, 6))
             + list(range(1, 6))
         ),
+        "정류장ID": [
+            "DEMO001", "DEMO002", "DEMO003", "DEMO004",
+            "DEMO005", "DEMO006", "DEMO007", "DEMO008",
+            "DEMO009", "DEMO010", "DEMO011", "DEMO012",
+            "DEMO013", "DEMO014", "DEMO015", "DEMO016",
+        ],
         "정류장명": [
             "오창산단", "오창읍사무소", "청주대학교",
             "내덕동", "성안길", "청주터미널",
-
             "오송역", "가경동", "청주터미널",
             "사창사거리", "충북대학교",
-
             "오창산단", "내수역", "청주대학교",
             "성안길", "용암동",
         ],
         "위도": [
             36.7153, 36.7050, 36.6500,
             36.6480, 36.6338, 36.6271,
-
             36.6205, 36.6240, 36.6271,
-            36.6342, 36.6280,
-
-            36.7153, 36.6900, 36.6500,
-            36.6338, 36.6080,
+            36.6342, 36.6280, 36.7153,
+            36.6900, 36.6500, 36.6338, 36.6080,
         ],
         "경도": [
             127.4258, 127.4400, 127.4950,
             127.4890, 127.4879, 127.4321,
-
             127.3274, 127.3900, 127.4321,
-            127.4567, 127.4580,
-
-            127.4258, 127.5050, 127.4950,
-            127.4879, 127.5100,
+            127.4567, 127.4580, 127.4258,
+            127.5050, 127.4950, 127.4879, 127.5100,
         ],
     })
+
+
+def normalize_xy(value):
+    """WGS84 decimal degree 또는 단순 숫자 문자열을 안전하게 변환."""
+    if pd.isna(value):
+        return np.nan
+
+    text = str(value).strip().replace(",", "")
+
+    try:
+        return float(text)
+    except ValueError:
+        pass
+
+    # DMS: 127°25'12.3" 형태
+    import re
+
+    nums = re.findall(r"[-+]?\d+(?:\.\d+)?", text)
+    if len(nums) >= 3:
+        deg = float(nums[0])
+        minute = float(nums[1])
+        second = float(nums[2])
+        sign = -1 if deg < 0 else 1
+        return sign * (
+            abs(deg)
+            + minute / 60
+            + second / 3600
+        )
+
+    return np.nan
+
+
+def load_stops(uploaded):
+    df, error = read_csv(uploaded)
+
+    if error:
+        return None, error
+
+    rename = {}
+
+    for col in df.columns:
+        raw = str(col).strip()
+        n = (
+            raw.replace(" ", "")
+            .replace("_", "")
+            .replace("-", "")
+            .lower()
+        )
+
+        if n in {
+            "서비스id",
+            "서비스아이디",
+            "승강장id",
+            "정류장id",
+            "정류소id",
+            "stationid",
+            "stopid",
+            "busstopid",
+        }:
+            rename[col] = "정류장ID"
+
+        elif n in {
+            "노선id", "노선아이디", "routeid",
+            "route", "노선번호", "노선명",
+        }:
+            rename[col] = "노선ID"
+
+        elif n in {
+            "정류장순번", "정류소순번",
+            "순번", "stopsequence",
+            "stopseq", "sequence",
+        }:
+            rename[col] = "정류장순번"
+
+        elif n in {
+            "정류장명", "정류소명",
+            "정류장", "정류소",
+            "stopname",
+        }:
+            rename[col] = "정류장명"
+
+        elif n in {
+            "좌표x", "x좌표", "경도",
+            "lon", "lng", "longitude",
+        }:
+            rename[col] = "경도"
+
+        elif n in {
+            "좌표y", "y좌표", "위도",
+            "lat", "latitude",
+        }:
+            rename[col] = "위도"
+
+    df = df.rename(columns=rename)
+
+    # 청주시 공식 파일은 서비스ID, 정류소명, 좌표(X), 좌표(Y) 구조다.
+    # 노선/순번은 공식 정류장 위치 데이터에 없을 수 있으므로
+    # 노선 지도는 별도의 노선-정류장 데이터가 있을 때 활성화한다.
+    if not {
+        "정류장명", "위도", "경도"
+    }.issubset(df.columns):
+        return None, (
+            "청주시 정류장 CSV를 인식하지 못했습니다.\n"
+            "청주시 공식 BIS 파일은 서비스ID, 정류소명, "
+            "좌표(X), 좌표(Y) 컬럼을 사용합니다."
+        )
+
+    if "정류장ID" not in df.columns:
+        df["정류장ID"] = (
+            "STOP_"
+            + pd.Series(
+                range(1, len(df) + 1),
+                index=df.index,
+            ).astype(str)
+        )
+
+    if "노선ID" not in df.columns:
+        df["노선ID"] = "정류장 위치 데이터"
+
+    if "정류장순번" not in df.columns:
+        df["정류장순번"] = (
+            df.groupby(
+                "노선ID",
+                sort=False,
+            ).cumcount()
+            + 1
+        )
+
+    df["정류장ID"] = (
+        df["정류장ID"]
+        .fillna("")
+        .astype(str)
+    )
+
+    df["노선ID"] = (
+        df["노선ID"]
+        .fillna("정류장 위치 데이터")
+        .astype(str)
+    )
+
+    df["정류장명"] = (
+        df["정류장명"]
+        .fillna("")
+        .astype(str)
+    )
+
+    df["위도"] = df["위도"].apply(
+        normalize_xy
+    )
+
+    df["경도"] = df["경도"].apply(
+        normalize_xy
+    )
+
+    df["정류장순번"] = pd.to_numeric(
+        df["정류장순번"],
+        errors="coerce",
+    )
+
+    df = df.dropna(
+        subset=["위도", "경도"]
+    ).copy()
+
+    # 한국 주변의 WGS84 좌표만 남긴다.
+    df = df[
+        df["위도"].between(33, 39)
+        & df["경도"].between(124, 132)
+    ].copy()
+
+    if df.empty:
+        return None, (
+            "유효한 WGS84 좌표가 없습니다. "
+            "좌표(X)=경도, 좌표(Y)=위도인지 확인하세요."
+        )
+
+    df["정류장순번"] = (
+        df["정류장순번"]
+        .fillna(0)
+        .astype(int)
+    )
+
+    return df.reset_index(drop=True), None
 
 
 # ------------------------------------------------------------
@@ -406,7 +592,17 @@ if population_file is not None:
     else:
         st.sidebar.error(error)
 
-st.sidebar.markdown("### 🗺️ 정류장·노선 데이터")
+st.sidebar.markdown("### 🗺️ 청주시 전체 정류장")
+
+st.sidebar.caption(
+    "청주시 공식 BIS 정류장 데이터 권장 · "
+    "CSV 업로드 시 전체 정류장을 지도에 반영합니다."
+)
+
+st.sidebar.caption(
+    "공식 데이터: 청주시 버스정보시스템(BIS), "
+    "2025-04 기준 3,402개 행"
+)
 
 stops_file = st.sidebar.file_uploader(
     "정류장/노선 CSV",
@@ -453,6 +649,13 @@ stops = (
     if st.session_state.stops is not None
     else default_stops()
 )
+
+stops_is_real = st.session_state.stops is not None
+
+if stops_is_real:
+    stops_source_label = "청주시 BIS CSV"
+else:
+    stops_source_label = "PoC 데모 정류장"
 
 
 # ============================================================
@@ -509,6 +712,17 @@ if page == "🏠 종합 대시보드":
         "🚌 AI 기반 미래예측형 "
         "대중교통 의사결정 지원 플랫폼"
     )
+
+    if stops_is_real:
+        st.success(
+            f"청주시 BIS 정류장 데이터 연결 완료 · "
+            f"{len(stops):,}개 정류장"
+        )
+    else:
+        st.warning(
+            "현재는 PoC 데모 정류장을 사용 중입니다. "
+            "청주시 공식 BIS CSV를 업로드하면 실제 전체 정류장이 반영됩니다."
+        )
 
     st.caption(
         "공모전용 PoC · 청주시 적용 시나리오"
@@ -576,20 +790,20 @@ if page == "🏠 종합 대시보드":
                 float(row["위도"]),
                 float(row["경도"]),
             ],
-            radius=4,
+            radius=3,
             color="#2563eb",
             fill=True,
             fill_color="#2563eb",
-            fill_opacity=0.75,
+            fill_opacity=0.65,
             tooltip=(
-                f"{row['노선ID']} · "
-                f"{row['정류장명']}"
+                f"{row['정류장명']} · "
+                f"ID {row['정류장ID']}"
             ),
         ).add_to(m)
 
     st_folium(
         m,
-        height=520,
+        height=620,
         use_container_width=True,
     )
 
@@ -891,34 +1105,57 @@ elif page == "🚌 대중교통 수요":
 
 elif page == "🗺️ 정류장·노선 지도":
 
-    st.header("🗺️ 정류장·노선 기반 공간 분석")
+    st.header("🗺️ 청주시 전체 정류장 지도")
 
-    route_ids = (
-        stops["노선ID"]
-        .astype(str)
-        .drop_duplicates()
-        .tolist()
+    st.caption(
+        f"데이터: {stops_source_label} · "
+        f"정류장 {len(stops):,}개"
     )
 
-    selected_routes = st.multiselect(
-        "표시할 노선",
-        route_ids,
-        default=route_ids[:min(3, len(route_ids))],
+    search = st.text_input(
+        "🔎 정류장 검색",
+        placeholder="정류장명 또는 정류장ID 입력",
     )
 
-    if not selected_routes:
-        st.warning("표시할 노선을 하나 이상 선택하세요.")
-    else:
+    filtered = stops.copy()
 
-        map_df = stops[
-            stops["노선ID"]
-            .astype(str)
-            .isin(selected_routes)
+    if search.strip():
+        q = search.strip().lower()
+
+        filtered = filtered[
+            filtered["정류장명"]
+            .str.lower()
+            .str.contains(q, na=False)
+            |
+            filtered["정류장ID"]
+            .str.lower()
+            .str.contains(q, na=False)
         ].copy()
 
+    a, b, c = st.columns(3)
+
+    a.metric(
+        "전체 정류장",
+        f"{len(stops):,}개",
+    )
+
+    b.metric(
+        "검색 결과",
+        f"{len(filtered):,}개",
+    )
+
+    c.metric(
+        "데이터 출처",
+        "청주시 BIS" if stops_is_real else "PoC",
+    )
+
+    if filtered.empty:
+        st.warning("검색 결과가 없습니다.")
+    else:
+
         center = [
-            map_df["위도"].mean(),
-            map_df["경도"].mean(),
+            filtered["위도"].mean(),
+            filtered["경도"].mean(),
         ]
 
         m = folium.Map(
@@ -928,99 +1165,156 @@ elif page == "🗺️ 정류장·노선 지도":
             control_scale=True,
         )
 
-        palette = [
-            "#dc2626",
-            "#2563eb",
-            "#16a34a",
-            "#9333ea",
-            "#ea580c",
-            "#0891b2",
-        ]
+        # 검색 결과가 많아도 지도 성능을 고려하여
+        # 전체 정류장은 가벼운 CircleMarker로 표시한다.
+        for _, row in filtered.iterrows():
 
-        for i, route_id in enumerate(
-            selected_routes
-        ):
-
-            route = map_df[
-                map_df["노선ID"].astype(str)
-                == route_id
-            ].sort_values(
-                "정류장순번"
-            )
-
-            points = []
-
-            for _, stop in route.iterrows():
-
-                point = [
-                    float(stop["위도"]),
-                    float(stop["경도"]),
-                ]
-
-                points.append(point)
-
-                folium.Marker(
-                    location=point,
-                    tooltip=(
-                        f"{route_id} · "
-                        f"{stop['정류장명']}"
-                    ),
-                    popup=(
-                        f"<b>{stop['정류장명']}</b><br>"
-                        f"노선: {route_id}<br>"
-                        f"순번: {int(stop['정류장순번'])}"
-                    ),
-                    icon=folium.Icon(
-                        color="blue",
-                        icon="bus",
-                        prefix="fa",
-                    ),
-                ).add_to(m)
-
-            if len(points) >= 2:
-
-                folium.PolyLine(
-                    locations=points,
-                    color=palette[
-                        i % len(palette)
-                    ],
-                    weight=6,
-                    opacity=0.85,
-                    tooltip=(
-                        f"{route_id} · "
-                        "정류장 순서 연결"
-                    ),
-                ).add_to(m)
+            folium.CircleMarker(
+                location=[
+                    float(row["위도"]),
+                    float(row["경도"]),
+                ],
+                radius=4 if len(filtered) < 1000 else 3,
+                color="#2563eb",
+                fill=True,
+                fill_color="#2563eb",
+                fill_opacity=0.7,
+                tooltip=(
+                    f"{row['정류장명']} · "
+                    f"{row['정류장ID']}"
+                ),
+                popup=(
+                    f"<b>{row['정류장명']}</b><br>"
+                    f"정류장 ID: {row['정류장ID']}<br>"
+                    f"위도: {row['위도']:.6f}<br>"
+                    f"경도: {row['경도']:.6f}"
+                ),
+            ).add_to(m)
 
         st_folium(
             m,
-            height=650,
+            height=680,
             use_container_width=True,
         )
 
-        st.markdown("### 📋 정류장 목록")
+        st.markdown("### 📋 정류장 정보")
 
         st.dataframe(
-            map_df.sort_values(
-                ["노선ID", "정류장순번"]
-            )[
+            filtered[
                 [
-                    "노선ID",
-                    "정류장순번",
+                    "정류장ID",
                     "정류장명",
                     "위도",
                     "경도",
                 ]
-            ],
+            ].sort_values("정류장명"),
             use_container_width=True,
             hide_index=True,
         )
 
-        st.caption(
-            "※ 지도 경로는 업로드된 정류장 좌표와 "
-            "정류장 순번을 연결한 것입니다. "
-            "도로를 따라가는 실제 운행궤적은 "
-            "도로망/GIS 또는 GPS 데이터가 필요합니다."
+    st.markdown("---")
+
+    st.subheader("🛣️ 실제 노선 경로 표시")
+
+    has_route_sequence = (
+        stops["노선ID"].nunique() > 1
+        and stops["정류장순번"].max() > 1
+        and stops["노선ID"].ne(
+            "정류장 위치 데이터"
+        ).any()
+    )
+
+    if has_route_sequence:
+
+        route_ids = (
+            stops["노선ID"]
+            .astype(str)
+            .drop_duplicates()
+            .tolist()
+        )
+
+        selected_route = st.selectbox(
+            "노선 선택",
+            route_ids,
+        )
+
+        route = stops[
+            stops["노선ID"].astype(str)
+            == selected_route
+        ].sort_values("정류장순번")
+
+        points = [
+            [float(x), float(y)]
+            for x, y in zip(
+                route["위도"],
+                route["경도"],
+            )
+        ]
+
+        route_map = folium.Map(
+            location=[
+                route["위도"].mean(),
+                route["경도"].mean(),
+            ],
+            zoom_start=12,
+            tiles="OpenStreetMap",
+        )
+
+        for _, row in route.iterrows():
+            folium.CircleMarker(
+                location=[
+                    float(row["위도"]),
+                    float(row["경도"]),
+                ],
+                radius=5,
+                color="#dc2626",
+                fill=True,
+                fill_color="#dc2626",
+                fill_opacity=0.8,
+                tooltip=(
+                    f"{int(row['정류장순번'])}. "
+                    f"{row['정류장명']}"
+                ),
+            ).add_to(route_map)
+
+        if len(points) >= 2:
+            folium.PolyLine(
+                locations=points,
+                color="#dc2626",
+                weight=6,
+                opacity=0.85,
+                tooltip=f"{selected_route} 노선",
+            ).add_to(route_map)
+
+        st_folium(
+            route_map,
+            height=550,
+            use_container_width=True,
+        )
+
+    else:
+
+        st.info(
+            "현재 연결된 청주시 BIS 파일은 "
+            "정류장 위치 데이터입니다. "
+            "이 파일에는 노선별 경유 순서가 없으므로 "
+            "정류장 전체 위치는 표시할 수 있지만 "
+            "실제 노선 선형은 별도의 '노선-정류장 순번' "
+            "데이터를 추가해야 합니다."
+        )
+
+        st.markdown(
+            """
+**다음 단계에서 추가할 데이터**
+
+`노선ID + 노선번호 + 정류장ID + 정류장순번`
+
+이 데이터를 연결하면
+
+**실제 정류장 → 정류장 순서 → 실제 노선 경로**
+
+를 지도에서 표현할 수 있습니다.
+"""
         )
 
 
