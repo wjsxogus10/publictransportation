@@ -1,24 +1,30 @@
-import streamlit as st
-import pandas as pd
-import folium
-from streamlit_folium import st_folium
-from math import radians, sin, cos, sqrt, atan2
+"""
+AI 기반 미래예측형 대중교통 의사결정 지원 플랫폼
+================================================
+
+현재 데이터
+- 충청북도_청주시_버스정보시스템_20250401.csv
+  · 서비스ID
+  · 정류소명
+  · 좌표(X)
+  · 좌표(Y)
+
+현재 CSV만으로 확인 가능한 것은 '실제 정류장 위치'입니다.
+노선번호와 정류장 순서가 없으므로 실제 버스노선은 임의로 만들지 않고,
+별도의 bus_routes.csv가 추가되었을 때 실제 노선 연동이 가능하도록 구성합니다.
+"""
+
+from math import atan2, cos, radians, sin, sqrt
 from pathlib import Path
 
+import folium
+import pandas as pd
+import streamlit as st
+from streamlit_folium import st_folium
+
+
 # ============================================================
-# AI 기반 미래예측형 대중교통 의사결정 지원 플랫폼
-# v3 - 청주시 실제 정류장 데이터 연동 PoC
-#
-# 기본 데이터:
-# 충청북도_청주시_버스정보시스템_20250401.csv
-#
-# 이 CSV에는 정류장 ID/명칭/좌표가 있으므로 실제 정류장 위치를
-# 지도에 표시할 수 있습니다.
-#
-# 주의:
-# 현재 CSV에는 "노선번호 + 노선별 정류장 순서"가 없으므로
-# 실제 버스노선을 임의로 만들어 표시하지 않습니다.
-# 실제 노선 데이터가 추가되면 route.csv를 통해 연결할 수 있습니다.
+# 1. 기본 설정
 # ============================================================
 
 st.set_page_config(
@@ -27,99 +33,59 @@ st.set_page_config(
     layout="wide",
 )
 
-DATA_FILE = "충청북도_청주시_버스정보시스템_20250401.csv"
-ROUTE_FILE = "bus_routes.csv"
+DATA_FILE = Path("충청북도_청주시_버스정보시스템_20250401.csv")
+ROUTE_FILE = Path("bus_routes.csv")
 
-st.title("🚌 AI 기반 미래예측형 대중교통 의사결정 지원 플랫폼")
-st.caption("공모전용 PoC · 청주시 실제 정류장 데이터 연동")
+REQUIRED_COLUMNS = {
+    "서비스ID",
+    "정류소명",
+    "좌표(X)",
+    "좌표(Y)",
+}
 
-st.info(
-    "현재 플랫폼은 GitHub에 등록한 청주시 실제 버스정보시스템 정류장 데이터를 "
-    "기본 지도 데이터로 사용합니다. 정류장 데이터에는 서비스ID, 정류소명, "
-    "X/Y 좌표가 포함되어 있습니다."
-)
+FUTURE_FACTORS = {
+    "신규 공동주택 개발": 8,
+    "산업단지 조성·확장": 7,
+    "철도 개통·환승거점 강화": 6,
+    "대규모 상업시설 개발": 5,
+    "대규모 행사·관광객 증가": 4,
+}
 
 
 # ============================================================
-# 기본 함수
+# 2. 데이터 처리 함수
 # ============================================================
 
-def haversine_km(a, b):
-    lat1, lon1 = a
-    lat2, lon2 = b
-
-    r = 6371.0
-
-    p1 = radians(lat1)
-    p2 = radians(lat2)
-
-    dphi = radians(lat2 - lat1)
-    dlambda = radians(lon2 - lon1)
-
-    value = (
-        sin(dphi / 2) ** 2
-        + cos(p1)
-        * cos(p2)
-        * sin(dlambda / 2) ** 2
-    )
-
-    value = max(0.0, min(1.0, value))
-
-    return (
-        2
-        * r
-        * atan2(
-            sqrt(value),
-            sqrt(1 - value),
-        )
-    )
-
-
-def read_csv_auto(path):
-    encodings = [
-        "utf-8-sig",
-        "cp949",
-        "euc-kr",
-        "utf-8",
-    ]
-
+def read_csv_auto(path: Path) -> pd.DataFrame:
+    """한글 CSV의 대표적인 인코딩을 순서대로 시도합니다."""
+    encodings = ["utf-8-sig", "cp949", "euc-kr", "utf-8"]
     last_error = None
 
-    for enc in encodings:
+    for encoding in encodings:
         try:
-            return pd.read_csv(
-                path,
-                encoding=enc,
-            )
-        except Exception as exc:
-            last_error = exc
+            return pd.read_csv(path, encoding=encoding)
+        except Exception as error:
+            last_error = error
 
     raise last_error
 
 
-def load_real_stops():
-    # GitHub/Streamlit Cloud의 현재 앱 폴더에서 찾음
-    path = Path(DATA_FILE)
+@st.cache_data
+def load_stops() -> tuple[pd.DataFrame | None, str | None]:
+    """청주시 실제 정류장 데이터를 읽고 필요한 컬럼을 정리합니다."""
 
-    if not path.exists():
+    if not DATA_FILE.exists():
         return None, (
-            f"'{DATA_FILE}' 파일을 app.py와 같은 폴더에 "
-            "업로드해야 합니다."
+            f"'{DATA_FILE.name}' 파일을 찾을 수 없습니다.\n"
+            "app.py와 같은 폴더에 CSV 파일을 넣어주세요."
         )
 
     try:
-        data = read_csv_auto(path)
-    except Exception as exc:
-        return None, f"CSV 읽기 오류: {exc}"
+        data = read_csv_auto(DATA_FILE)
+    except Exception as error:
+        return None, f"CSV 읽기 오류: {error}"
 
-    required = {
-        "서비스ID",
-        "정류소명",
-        "좌표(X)",
-        "좌표(Y)",
-    }
-
-    missing = required - set(data.columns)
+    missing = REQUIRED_COLUMNS - set(data.columns)
 
     if missing:
         return None, (
@@ -129,6 +95,7 @@ def load_real_stops():
 
     data = data.copy()
 
+    # 문자열 정리
     data["서비스ID"] = (
         data["서비스ID"]
         .fillna("")
@@ -143,6 +110,7 @@ def load_real_stops():
         .str.strip()
     )
 
+    # 좌표 숫자 변환
     data["경도"] = pd.to_numeric(
         data["좌표(X)"],
         errors="coerce",
@@ -153,144 +121,253 @@ def load_real_stops():
         errors="coerce",
     )
 
+    # 좌표가 없는 행 제거
     data = data.dropna(
-        subset=[
-            "위도",
-            "경도",
-        ]
+        subset=["위도", "경도"]
     ).copy()
 
-    # 대한민국 인근 좌표만 남겨 비정상 데이터 방지
+    # 대한민국 주변의 비정상 좌표 제거
     data = data[
         data["위도"].between(33, 39)
         & data["경도"].between(124, 132)
     ].copy()
 
-    data = data.reset_index(drop=True)
-
-    return data, None
+    return data.reset_index(drop=True), None
 
 
-def load_route_file():
-    path = Path(ROUTE_FILE)
-
-    if not path.exists():
+@st.cache_data
+def load_route_data() -> pd.DataFrame | None:
+    """실제 노선 데이터가 있으면 읽습니다."""
+    if not ROUTE_FILE.exists():
         return None
 
     try:
-        return read_csv_auto(path)
+        return read_csv_auto(ROUTE_FILE)
     except Exception:
         return None
 
 
-def nearest_stops(df, lat, lon, n=8):
-    temp = df.copy()
+def haversine_km(
+    point_a: tuple[float, float],
+    point_b: tuple[float, float],
+) -> float:
+    """두 좌표 사이의 직선거리를 km로 계산합니다."""
 
-    temp["_거리(km)"] = (
-        (
-            (temp["위도"] - lat) ** 2
-            + (temp["경도"] - lon) ** 2
-        ) ** 0.5
+    lat1, lon1 = point_a
+    lat2, lon2 = point_b
+
+    earth_radius = 6371.0
+
+    d_lat = radians(lat2 - lat1)
+    d_lon = radians(lon2 - lon1)
+
+    a = (
+        sin(d_lat / 2) ** 2
+        + cos(radians(lat1))
+        * cos(radians(lat2))
+        * sin(d_lon / 2) ** 2
     )
 
-    return temp.nsmallest(
-        n,
-        "_거리(km)",
-    ).copy()
+    a = max(0.0, min(1.0, a))
+
+    return 2 * earth_radius * atan2(
+        sqrt(a),
+        sqrt(1 - a),
+    )
+
+
+def nearest_stops(
+    data: pd.DataFrame,
+    latitude: float,
+    longitude: float,
+    count: int = 6,
+) -> pd.DataFrame:
+    """특정 좌표 주변의 정류장 후보를 찾습니다."""
+
+    result = data.copy()
+
+    # 빠른 후보 검색용 좌표 거리
+    result["_좌표거리"] = (
+        (result["위도"] - latitude) ** 2
+        + (result["경도"] - longitude) ** 2
+    ) ** 0.5
+
+    return result.nsmallest(
+        count,
+        "_좌표거리",
+    ).drop(columns="_좌표거리")
+
+
+def calculate_future_impact(
+    selected_factors: list[str],
+) -> int:
+    """선택한 미래 도시변화 요소를 PoC용 영향지수로 계산합니다."""
+
+    # 기본 +5%를 두고 선택 요소의 가중치를 합산
+    impact = 5 + sum(
+        FUTURE_FACTORS[factor]
+        for factor in selected_factors
+    )
+
+    return min(impact, 50)
 
 
 # ============================================================
-# 실제 청주시 정류장 데이터 로드
+# 3. 지도 함수
 # ============================================================
 
-stops, load_error = load_real_stops()
+def create_stop_map(
+    data: pd.DataFrame,
+    center: tuple[float, float],
+    zoom: int = 11,
+) -> folium.Map:
+    """정류장 위치를 Folium 지도에 표시합니다."""
+
+    map_object = folium.Map(
+        location=center,
+        zoom_start=zoom,
+        tiles="CartoDB positron",
+    )
+
+    for _, row in data.iterrows():
+        popup_html = (
+            f"<b>{row['정류소명']}</b><br>"
+            f"서비스ID: {row['서비스ID']}<br>"
+            f"경도: {row['경도']:.6f}<br>"
+            f"위도: {row['위도']:.6f}"
+        )
+
+        folium.CircleMarker(
+            location=[
+                row["위도"],
+                row["경도"],
+            ],
+            radius=4,
+            color="black",
+            fill=True,
+            fill_opacity=0.65,
+            tooltip=row["정류소명"],
+            popup=folium.Popup(
+                popup_html,
+                max_width=280,
+            ),
+        ).add_to(map_object)
+
+    return map_object
+
+
+def create_candidate_route_map(
+    points: list[tuple[float, float]],
+) -> folium.Map:
+    """AI 후보 노선을 지도에 표시합니다."""
+
+    center_lat = sum(
+        point[0] for point in points
+    ) / len(points)
+
+    center_lon = sum(
+        point[1] for point in points
+    ) / len(points)
+
+    map_object = folium.Map(
+        location=[
+            center_lat,
+            center_lon,
+        ],
+        zoom_start=12,
+        tiles="CartoDB positron",
+    )
+
+    last_index = len(points) - 1
+
+    for index, point in enumerate(points):
+        if index == 0:
+            label = "출발"
+        elif index == last_index:
+            label = "도착"
+        else:
+            label = f"중간 후보 {index}"
+
+        folium.Marker(
+            location=point,
+            tooltip=label,
+        ).add_to(map_object)
+
+    folium.PolyLine(
+        points,
+        color="red",
+        weight=6,
+        opacity=0.85,
+        tooltip="AI 노선 후보",
+    ).add_to(map_object)
+
+    return map_object
+
+
+# ============================================================
+# 4. 데이터 불러오기
+# ============================================================
+
+stops, load_error = load_stops()
 
 if stops is None:
-    st.error(
-        "청주시 실제 정류장 CSV를 불러오지 못했습니다."
-    )
+    st.error("청주시 정류장 데이터를 불러오지 못했습니다.")
     st.code(load_error)
     st.stop()
 
 
 # ============================================================
-# 사이드바
+# 5. 사이드바
 # ============================================================
 
-st.sidebar.header("🗺️ 실제 청주시 정류장")
+st.sidebar.title("🚌 분석 설정")
 
 st.sidebar.metric(
-    "불러온 정류장 데이터",
+    "실제 정류장 데이터",
     f"{len(stops):,}개",
 )
 
+st.sidebar.markdown("---")
+st.sidebar.subheader("🔎 정류장 검색")
 
-search = st.sidebar.text_input(
-    "정류소명 검색",
-    placeholder="예: KBS, 가경, 내덕",
+search_keyword = st.sidebar.text_input(
+    "정류소명",
+    placeholder="예: KBS / 가경 / 내덕",
 )
 
-
-if search.strip():
-    filtered = stops[
-        stops["정류소명"]
-        .str.contains(
-            search.strip(),
+if search_keyword.strip():
+    filtered_stops = stops[
+        stops["정류소명"].str.contains(
+            search_keyword.strip(),
             case=False,
             na=False,
         )
     ].copy()
 else:
-    filtered = stops.copy()
-
+    filtered_stops = stops.copy()
 
 st.sidebar.write(
-    f"검색 결과: **{len(filtered):,}개**"
+    f"검색 결과: **{len(filtered_stops):,}개**"
 )
 
-
-# ============================================================
-# 미래 도시변화 시나리오
-# ============================================================
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🏙️ 미래 도시변화")
 
-year = st.sidebar.selectbox(
+prediction_year = st.sidebar.selectbox(
     "예측 연도",
     [2027, 2028, 2029, 2030],
     index=1,
 )
 
-future_factors = {
-    "신규 공동주택 개발": 8,
-    "산업단지 조성·확장": 7,
-    "철도 개통·환승거점 강화": 6,
-    "대규모 상업시설 개발": 5,
-    "대규모 행사·관광객 증가": 4,
-}
-
 selected_factors = []
 
-for factor, impact in future_factors.items():
+for factor in FUTURE_FACTORS:
+    if st.sidebar.checkbox(factor):
+        selected_factors.append(factor)
 
-    if st.sidebar.checkbox(
-        factor,
-        value=False,
-    ):
-        selected_factors.append(
-            (factor, impact)
-        )
-
-
-future_impact = 5 + sum(
-    impact
-    for _, impact in selected_factors
-)
-
-future_impact = min(
-    future_impact,
-    50,
+future_impact = calculate_future_impact(
+    selected_factors
 )
 
 st.sidebar.metric(
@@ -299,73 +376,88 @@ st.sidebar.metric(
 )
 
 
-# ============================================================
-# 지도 설정
-# ============================================================
-
 st.sidebar.markdown("---")
-st.sidebar.subheader("📍 지도 표시")
+st.sidebar.subheader("🗺️ 지도 설정")
 
-display_mode = st.sidebar.radio(
-    "정류장 표시 범위",
+map_mode = st.sidebar.radio(
+    "표시 범위",
     [
         "검색 결과",
         "청주시 전체",
     ],
-    index=0 if search.strip() else 1,
+    index=0 if search_keyword.strip() else 1,
 )
 
 max_markers = st.sidebar.slider(
-    "최대 표시 정류장 수",
-    100,
-    1000,
-    500,
-    100,
+    "최대 정류장 표시 수",
+    min_value=100,
+    max_value=1000,
+    value=500,
+    step=100,
 )
 
 
 # ============================================================
-# 메인 KPI
+# 6. 메인 화면
 # ============================================================
 
-st.markdown("## ① 실제 청주시 정류장 데이터")
+st.title(
+    "🚌 AI 기반 미래예측형 "
+    "대중교통 의사결정 지원 플랫폼"
+)
 
-c1, c2, c3, c4 = st.columns(4)
+st.caption(
+    "공모전용 PoC · 청주시 실제 정류장 데이터 연동"
+)
 
-c1.metric(
+st.info(
+    "현재 플랫폼은 청주시 버스정보시스템의 실제 정류장 "
+    "위치 데이터를 기반으로 미래 도시변화와 "
+    "대중교통 정책 시나리오를 검토합니다."
+)
+
+
+# ============================================================
+# 7. KPI
+# ============================================================
+
+st.markdown("## ① 현황 데이터")
+
+kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+
+kpi1.metric(
     "전체 정류장",
     f"{len(stops):,}개",
 )
 
-c2.metric(
+kpi2.metric(
     "검색 정류장",
-    f"{len(filtered):,}개",
+    f"{len(filtered_stops):,}개",
 )
 
-c3.metric(
+kpi3.metric(
     "예측 연도",
-    f"{year}년",
+    f"{prediction_year}년",
 )
 
-c4.metric(
-    "미래 도시변화 영향",
+kpi4.metric(
+    "미래 수요 영향",
     f"+{future_impact}%",
 )
 
-
 st.caption(
-    "※ 현재 업로드된 원본 CSV의 컬럼은 "
-    "서비스ID·정류소명·좌표(X)·좌표(Y)입니다."
+    "원본 데이터의 주요 항목: "
+    "서비스ID · 정류소명 · 좌표(X) · 좌표(Y)"
 )
 
 
 # ============================================================
-# 정류장 검색 결과
+# 8. 정류장 검색 결과
 # ============================================================
 
 st.markdown("### 🔎 실제 정류장 검색")
 
-show_table = filtered[
+display_table = filtered_stops[
     [
         "서비스ID",
         "정류소명",
@@ -375,239 +467,191 @@ show_table = filtered[
 ].head(100)
 
 st.dataframe(
-    show_table,
+    display_table,
     use_container_width=True,
     hide_index=True,
 )
 
 
 # ============================================================
-# 지도
+# 9. 실제 정류장 지도
 # ============================================================
 
 st.markdown("---")
 st.markdown("## ② 실제 청주시 정류장 지도")
 
-
-if display_mode == "검색 결과":
-    map_data = filtered.copy()
+if map_mode == "검색 결과":
+    map_data = filtered_stops.copy()
 else:
     map_data = stops.copy()
 
-
 if len(map_data) > max_markers:
-
-    # 검색 결과를 우선적으로 표시하고,
-    # 전체 데이터일 경우 균등하게 샘플링
     map_data = map_data.sample(
         n=max_markers,
         random_state=42,
     )
 
-
-center_lat = float(
-    stops["위도"].mean()
+center = (
+    float(stops["위도"].mean()),
+    float(stops["경도"].mean()),
 )
 
-center_lon = float(
-    stops["경도"].mean()
+stop_map = create_stop_map(
+    map_data,
+    center=center,
 )
-
-
-m = folium.Map(
-    location=[
-        center_lat,
-        center_lon,
-    ],
-    zoom_start=11,
-    tiles="CartoDB positron",
-)
-
-
-for _, row in map_data.iterrows():
-
-    popup = folium.Popup(
-        (
-            f"<b>{row['정류소명']}</b><br>"
-            f"서비스ID: {row['서비스ID']}<br>"
-            f"경도: {row['경도']:.6f}<br>"
-            f"위도: {row['위도']:.6f}"
-        ),
-        max_width=280,
-    )
-
-    folium.CircleMarker(
-        location=[
-            row["위도"],
-            row["경도"],
-        ],
-        radius=4,
-        color="black",
-        fill=True,
-        fill_opacity=0.65,
-        popup=popup,
-        tooltip=row["정류소명"],
-    ).add_to(m)
-
 
 st_folium(
-    m,
+    stop_map,
     width=None,
     height=600,
 )
 
 
 # ============================================================
-# 정류장 기반 AI 후보 분석
+# 10. 미래 도시변화 기반 AI 노선 후보
 # ============================================================
 
 st.markdown("---")
-st.markdown("## ③ 미래 도시변화 기반 노선 후보 분석")
+st.markdown("## ③ 미래 도시변화 기반 AI 노선 후보")
 
 st.warning(
-    "현재 CSV에는 노선번호와 노선별 정류장 순서가 포함되어 있지 않습니다. "
-    "따라서 아래 결과는 '실제 버스노선'이 아니라 "
-    "실제 정류장 위치를 활용한 **AI 노선 후보 시뮬레이션**입니다."
+    "현재 정류장 CSV에는 노선번호와 정류장 순서가 없습니다. "
+    "따라서 아래 결과는 실제 운행노선이 아니라 "
+    "'실제 정류장 위치를 활용한 AI 노선 후보 시뮬레이션'입니다."
 )
 
 
-if len(stops) >= 2:
+if len(stops) < 2:
+    st.error("노선 후보 분석에 필요한 정류장 데이터가 부족합니다.")
+else:
+    # 정류장 선택용 표시명
+    stop_options = (
+        stops[
+            [
+                "서비스ID",
+                "정류소명",
+            ]
+        ]
+        .drop_duplicates()
+        .copy()
+    )
 
-    col1, col2 = st.columns(2)
+    stop_options["표시명"] = (
+        stop_options["정류소명"]
+        + "  | ID: "
+        + stop_options["서비스ID"]
+    )
 
-    with col1:
+    origin_label, destination_label = st.columns(2)
 
-        origin_name = st.selectbox(
+    with origin_label:
+        origin_option = st.selectbox(
             "출발 정류장",
-            stops["정류소명"].tolist(),
+            stop_options["표시명"].tolist(),
             index=0,
         )
 
-    with col2:
-
-        destination_name = st.selectbox(
-            "도착 정류장",
-            stops["정류소명"].tolist(),
-            index=min(
-                1,
-                len(stops) - 1,
-            ),
+    with destination_label:
+        destination_index = (
+            1 if len(stop_options) > 1 else 0
         )
 
+        destination_option = st.selectbox(
+            "도착 정류장",
+            stop_options["표시명"].tolist(),
+            index=destination_index,
+        )
 
-    origin_candidates = stops[
-        stops["정류소명"]
-        == origin_name
-    ]
+    origin_id = origin_option.split(" | ID: ")[-1]
+    destination_id = destination_option.split(" | ID: ")[-1]
 
-    destination_candidates = stops[
-        stops["정류소명"]
-        == destination_name
-    ]
+    origin = stops[
+        stops["서비스ID"] == origin_id
+    ].iloc[0]
 
+    destination = stops[
+        stops["서비스ID"] == destination_id
+    ].iloc[0]
 
-    origin = origin_candidates.iloc[0]
-    destination = destination_candidates.iloc[0]
-
-
-    origin_coord = (
+    origin_point = (
         float(origin["위도"]),
         float(origin["경도"]),
     )
 
-    destination_coord = (
+    destination_point = (
         float(destination["위도"]),
         float(destination["경도"]),
     )
 
-
     direct_distance = haversine_km(
-        origin_coord,
-        destination_coord,
+        origin_point,
+        destination_point,
     )
 
-
-    # 미래 도시변화가 클수록 잠재적 수요가 증가하는
-    # PoC용 가정
+    # PoC용 수요지수
     demand_index = round(
-        100 * (
-            1
-            + future_impact / 100
-        ),
+        100 * (1 + future_impact / 100),
         1,
     )
 
-
-    estimated_time = round(
-        direct_distance
-        / 25
-        * 60,
+    # 평균 25km/h라는 PoC 가정
+    estimated_minutes = round(
+        direct_distance / 25 * 60,
         1,
     )
 
+    result1, result2, result3 = st.columns(3)
 
-    if direct_distance < 1:
+    result1.metric(
+        "직선거리",
+        f"{direct_distance:.2f} km",
+    )
 
-        st.info(
-            "출발지와 도착지가 매우 가깝습니다."
-        )
+    result2.metric(
+        "예상 통행시간",
+        f"{estimated_minutes:.1f}분",
+    )
 
-    else:
+    result3.metric(
+        "미래 수요지수",
+        f"{demand_index:.1f}",
+    )
 
-        p1, p2, p3 = st.columns(3)
+    # 출발·도착 중간 지점 주변의 정류장 후보
+    middle_latitude = (
+        origin["위도"]
+        + destination["위도"]
+    ) / 2
 
-        p1.metric(
-            "직선거리",
-            f"{direct_distance:.2f} km",
-        )
-
-        p2.metric(
-            "예상 통행시간",
-            f"{estimated_time:.1f}분",
-        )
-
-        p3.metric(
-            "미래 수요지수",
-            f"{demand_index:.1f}",
-        )
-
+    middle_longitude = (
+        origin["경도"]
+        + destination["경도"]
+    ) / 2
 
     nearby = nearest_stops(
         stops,
-        (
-            origin["위도"]
-            + destination["위도"]
-        ) / 2,
-        (
-            origin["경도"]
-            + destination["경도"]
-        ) / 2,
-        n=6,
+        middle_latitude,
+        middle_longitude,
+        count=6,
     )
 
-
-    st.markdown(
-        "### AI 후보 노선"
-    )
+    st.markdown("### 🧠 AI 후보 노선")
 
     st.write(
-        "선택한 실제 정류장을 출발·도착 거점으로 설정하고 "
-        "중간 생활권 정류장을 후보로 탐색하는 PoC입니다."
+        "출발·도착 정류장 사이의 생활권 정류장을 "
+        "중간 후보로 선택하여 경로를 구성합니다."
     )
 
+    candidate_points = [origin_point]
 
-    candidate_points = [
-        origin_coord,
-    ]
-
-
-    # 중간 후보 중 출발/도착과 동일하지 않은 정류장 추가
     for _, candidate in nearby.iterrows():
+        candidate_id = str(candidate["서비스ID"])
 
-        if candidate["정류소명"] in [
-            origin_name,
-            destination_name,
-        ]:
+        if candidate_id in {
+            origin_id,
+            destination_id,
+        }:
             continue
 
         candidate_points.append(
@@ -617,156 +661,102 @@ if len(stops) >= 2:
             )
         )
 
-        if len(candidate_points) >= 4:
+        # 출발 + 중간 후보 2개 + 도착 구조
+        if len(candidate_points) >= 3:
             break
 
-
-    candidate_points.append(
-        destination_coord
-    )
-
+    candidate_points.append(destination_point)
 
     candidate_distance = sum(
         haversine_km(
-            candidate_points[i],
-            candidate_points[i + 1],
+            candidate_points[index],
+            candidate_points[index + 1],
         )
-        for i in range(
+        for index in range(
             len(candidate_points) - 1
         )
     )
 
-
-    st.write(
-        f"**AI 후보 노선 거리:** "
-        f"{candidate_distance:.2f} km"
+    st.metric(
+        "AI 후보 노선 총 거리",
+        f"{candidate_distance:.2f} km",
     )
 
-
-    route_map = folium.Map(
-        location=[
-            (
-                origin["위도"]
-                + destination["위도"]
-            ) / 2,
-            (
-                origin["경도"]
-                + destination["경도"]
-            ) / 2,
-        ],
-        zoom_start=12,
-        tiles="CartoDB positron",
-    )
-
-
-    for idx, point in enumerate(
+    candidate_map = create_candidate_route_map(
         candidate_points
-    ):
-
-        label = (
-            "출발"
-            if idx == 0
-            else (
-                "도착"
-                if idx == len(candidate_points) - 1
-                else f"중간 후보 {idx}"
-            )
-        )
-
-        folium.Marker(
-            location=point,
-            tooltip=label,
-        ).add_to(route_map)
-
-
-    folium.PolyLine(
-        candidate_points,
-        color="red",
-        weight=6,
-        opacity=0.85,
-        tooltip="AI 노선 후보",
-    ).add_to(route_map)
-
+    )
 
     st_folium(
-        route_map,
+        candidate_map,
         width=None,
         height=500,
     )
 
 
 # ============================================================
-# 실제 노선 데이터 연동 준비
+# 11. 실제 버스노선 데이터 연동
 # ============================================================
 
 st.markdown("---")
-st.markdown("## ④ 실제 버스노선 연동 상태")
+st.markdown("## ④ 실제 버스노선 연동")
 
-
-route_data = load_route_file()
-
+route_data = load_route_data()
 
 if route_data is None:
-
     st.info(
-        "현재 GitHub 저장소에는 "
-        f"'{ROUTE_FILE}'이 없어 실제 노선선형은 표시하지 않습니다."
+        f"현재 '{ROUTE_FILE.name}' 파일이 없습니다. "
+        "실제 노선을 연결하려면 아래 형태의 CSV를 추가하세요."
     )
 
-    st.write(
-        "실제 노선을 연결하려면 다음 구조의 CSV를 추가하면 됩니다."
+    example_route = pd.DataFrame(
+        {
+            "노선번호": ["101", "101", "101"],
+            "정류장순번": [1, 2, 3],
+            "서비스ID": [
+                "1001",
+                "1002",
+                "1003",
+            ],
+        }
     )
-
-    example = pd.DataFrame({
-        "노선번호": ["101", "101", "101"],
-        "정류장순번": [1, 2, 3],
-        "서비스ID": [
-            "1001",
-            "1002",
-            "1003",
-        ],
-    })
 
     st.dataframe(
-        example,
+        example_route,
         use_container_width=True,
         hide_index=True,
     )
 
     st.caption(
-        "서비스ID는 현재 청주시 정류장 CSV의 서비스ID와 연결합니다."
+        "서비스ID는 현재 청주시 정류장 데이터의 "
+        "서비스ID와 연결합니다."
     )
 
 else:
-
     st.success(
-        f"실제 노선 데이터 '{ROUTE_FILE}'를 발견했습니다."
+        f"'{ROUTE_FILE.name}'을 발견했습니다."
     )
 
     st.dataframe(
         route_data.head(100),
         use_container_width=True,
+        hide_index=True,
     )
 
 
 # ============================================================
-# 행정 의사결정 지원
+# 12. 행정 의사결정 지원
 # ============================================================
 
 st.markdown("---")
 st.markdown("## ⑤ 행정 의사결정 지원")
 
-decision_col1, decision_col2 = st.columns(2)
+decision_left, decision_right = st.columns(2)
 
-
-with decision_col1:
-
-    st.subheader(
-        "정책 대안"
-    )
+with decision_left:
+    st.subheader("정책 대안")
 
     policy = st.radio(
-        "검토할 정책",
+        "검토할 정책을 선택하세요.",
         [
             "현행 노선 유지",
             "노선 변경",
@@ -776,15 +766,11 @@ with decision_col1:
         ],
     )
 
-
-with decision_col2:
-
-    st.subheader(
-        "행정기관 판단"
-    )
+with decision_right:
+    st.subheader("행정기관 판단")
 
     decision = st.selectbox(
-        "최종 결정",
+        "최종 판단",
         [
             "검토 중",
             "정책 대안 채택",
@@ -794,67 +780,62 @@ with decision_col2:
 
 
 if decision == "정책 대안 채택":
-
     st.success(
-        f"최종 선택 정책: **{policy}**"
+        f"선택된 정책 대안: **{policy}**"
     )
 
 elif decision == "추가 데이터 검토":
-
     st.warning(
-        "교통카드·BIS·도시계획 등 추가 데이터 "
-        "검토 후 재평가합니다."
+        "교통카드·BIS·도시계획 등 추가 데이터를 "
+        "검토한 후 재평가합니다."
     )
 
 else:
-
     st.info(
-        "AI 분석 결과를 참고하여 "
-        "행정기관이 최종 결정합니다."
+        "AI 분석 결과는 의사결정 지원 자료이며, "
+        "최종 정책은 행정기관이 결정합니다."
     )
 
 
 # ============================================================
-# 시민 피드백
+# 13. 시민 피드백
 # ============================================================
 
 st.markdown("---")
 st.markdown("## ⑥ 정책 시행 후 시민 피드백")
 
-s1, s2, s3 = st.columns(3)
+feedback1, feedback2, feedback3 = st.columns(3)
 
-with s1:
+with feedback1:
     satisfaction = st.slider(
         "전체 만족도",
-        1,
-        5,
-        4,
+        min_value=1,
+        max_value=5,
+        value=4,
     )
 
-with s2:
+with feedback2:
     waiting = st.slider(
         "대기시간 만족도",
-        1,
-        5,
-        4,
+        min_value=1,
+        max_value=5,
+        value=4,
     )
 
-with s3:
+with feedback3:
     transfer = st.slider(
         "환승 편의 만족도",
-        1,
-        5,
-        4,
+        min_value=1,
+        max_value=5,
+        value=4,
     )
 
-
-comment = st.text_area(
+citizen_comment = st.text_area(
     "시민 의견",
-    placeholder="예: 출퇴근 시간 배차를 줄여주세요.",
+    placeholder="예: 출퇴근 시간 배차 간격을 줄여주세요.",
 )
 
-
-average_feedback = round(
+feedback_average = round(
     (
         satisfaction
         + waiting
@@ -863,80 +844,97 @@ average_feedback = round(
     2,
 )
 
-
 st.metric(
     "시민 종합 만족도",
-    f"{average_feedback:.2f} / 5",
+    f"{feedback_average:.2f} / 5",
 )
 
-
-if st.button(
-    "📊 시민 피드백 분석"
-):
-
-    if average_feedback >= 4:
-
+if st.button("📊 시민 피드백 분석"):
+    if feedback_average >= 4:
         st.success(
             "시민 만족도가 높습니다. "
-            "현 정책의 유지·확대를 검토합니다."
+            "현 정책의 유지·확대를 검토할 수 있습니다."
         )
 
-    elif average_feedback >= 3:
-
+    elif feedback_average >= 3:
         st.warning(
             "시민 만족도가 보통입니다. "
-            "대기시간·환승체계 등의 부분 개선을 검토합니다."
+            "대기시간과 환승체계 등의 부분 개선을 검토합니다."
         )
 
     else:
-
         st.error(
             "시민 만족도가 낮습니다. "
-            "노선·배차 운영의 재검토가 필요합니다."
+            "노선 및 배차 운영의 재검토가 필요합니다."
         )
 
-    if comment.strip():
-
+    if citizen_comment.strip():
         st.write(
-            f"**시민 의견:** {comment}"
+            f"**시민 의견:** {citizen_comment}"
         )
 
 
 # ============================================================
-# 정책 순환
+# 14. 전체 정책 순환 구조
 # ============================================================
 
 st.markdown("---")
-st.markdown("## ⑦ 정책 시행 → 데이터 → AI 개선")
+st.markdown("## ⑦ 데이터 기반 정책 순환")
 
 st.markdown(
     """
-**정책 시행**
-→ **운영 데이터 수집**
-→ **시민 피드백 수집**
-→ **AI 분석·학습**
-→ **다음 수요예측**
-→ **노선·배차 대안 개선**
+### 정책 시행
+↓
+### 운영 데이터 수집
+↓
+### 시민 피드백 수집
+↓
+### AI 분석·학습
+↓
+### 미래 수요 예측
+↓
+### 노선·배차 대안 개선
+↓
+### 정책 재시행
 """
 )
 
 
-with st.expander(
-    "📌 데이터 및 모델의 한계"
-):
+# ============================================================
+# 15. 데이터 한계 및 향후 확장
+# ============================================================
+
+with st.expander("📌 현재 데이터의 한계와 향후 확장"):
 
     st.write(
         """
-현재 제공된 청주시 CSV는 실제 정류장의 서비스ID,
-정류소명, 좌표(X/Y)를 제공하므로 실제 정류장 위치를
-지도에 반영할 수 있습니다.
+현재 제공된 청주시 CSV는 실제 정류장의
+서비스ID, 정류소명, 좌표(X/Y)를 제공합니다.
 
-반면 이 파일 자체에는 노선번호, 노선별 정류장 순서,
-교통카드 승하차량, 환승량 등의 정보가 없습니다.
+따라서 실제 정류장 위치를 지도에 표시하고
+정류장 기반의 후보 분석을 수행할 수 있습니다.
 
-따라서 본 PoC에서는 실제 정류장 위치와
-미래 도시변화 시나리오를 먼저 연결하고,
-실제 노선·수요 데이터가 확보되면 노선 단위
-수요예측 및 정책 시뮬레이션으로 확장하는 구조입니다.
-        """
+다만 현재 CSV만으로는 다음 정보가 없습니다.
+
+- 노선번호
+- 노선별 정류장 순서
+- 교통카드 승하차량
+- 시간대별 수요
+- 환승량
+- 배차간격
+- 통행시간
+
+따라서 현재 버전은 '정류장 위치 기반 PoC'입니다.
+
+향후 실제 노선 및 수요 데이터를 추가하면
+다음 단계로 확장할 수 있습니다.
+
+실제 노선
+→ 승하차 수요 분석
+→ 미래 개발지역 수요 예측
+→ 노선 대안 생성
+→ 기존 노선과 대안 비교
+→ 시민 피드백
+→ 정책 재평가
+"""
     )
